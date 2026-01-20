@@ -124,6 +124,7 @@ class ExampleVLM(BaseVLM):
                     "frame_shape": frame_shape,
                     "prompt": prompt,
                     "model_type": self._model_type,
+                    "model_id": self._model_type,  # Add model_id (same as model_type for now)
                     "device": self._device,
                     "timestamp": predictions["timestamp"]
                 }

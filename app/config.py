@@ -43,7 +43,11 @@ class Settings(BaseSettings):
     # Ray Serve Configuration
     ray_serve_host: str = Field(default="0.0.0.0", env="RAY_SERVE_HOST", description="Ray Serve host")
     ray_serve_port: int = Field(default=8000, env="RAY_SERVE_PORT", ge=1, le=65535, description="Ray Serve port")
+    ray_serve_url: str = Field(default="http://localhost:8000", env="RAY_SERVE_URL", description="Ray Serve backend URL for streaming API")
     num_replicas: int = Field(default=1, env="NUM_REPLICAS", ge=1, description="Number of deployment replicas")
+    
+    # Streaming API Configuration
+    streaming_api_port: int = Field(default=8001, env="STREAMING_API_PORT", ge=1, le=65535, description="FastAPI streaming service port")
     
     # Memory Management
     max_concurrent_streams: int = Field(default=10, env="MAX_CONCURRENT_STREAMS", ge=1, description="Maximum concurrent stream processing jobs")

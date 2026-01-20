@@ -138,7 +138,7 @@ All endpoints are handled by Ray Serve deployments using Ray Serve's native HTTP
 
 #### `GET /health`
 
-Overall health check endpoint.
+Health check endpoint.
 
 **Response** (200 OK):
 ```json
@@ -148,34 +148,6 @@ Overall health check endpoint.
   "uptime_formatted": "1h 0m 0s",
   "timestamp": "2024-01-19T12:00:00Z",
   "model_loaded": true
-}
-```
-
-#### `GET /health/ready`
-
-Readiness check for orchestration systems (Kubernetes, etc.). Returns 503 if not ready.
-
-**Response** (200 OK if ready, 503 if not ready):
-```json
-{
-  "ready": true,
-  "status": "ready",
-  "checks": {
-    "model_loaded": true
-  },
-  "timestamp": "2024-01-19T12:00:00Z"
-}
-```
-
-#### `GET /health/live`
-
-Liveness check endpoint. Always returns 200 if service is running.
-
-**Response** (200 OK):
-```json
-{
-  "alive": true,
-  "timestamp": "2024-01-19T12:00:00Z"
 }
 ```
 
@@ -209,38 +181,9 @@ Start inference on a video stream.
 - `429 Too Many Requests`: Maximum concurrent streams reached
 - `500 Internal Server Error`: Server error
 
-#### `GET /api/v1/inference/status/{job_id}`
-
-Get the status of an inference job.
-
-**Path Parameters**:
-- `job_id` (string, required): Job identifier
-
-**Response** (200 OK):
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "running",
-  "stream_ref": "https://example.com/stream.m3u8",
-  "prompt": "Detect all people and vehicles",
-  "fps": 2.0,
-  "created_at": 1705665600.0,
-  "started_at": 1705665601.0,
-  "completed_at": null,
-  "frames_processed": 120,
-  "results_count": 15,
-  "error": null
-}
-```
-
-**Status Values**: `pending`, `running`, `completed`, `failed`, `cancelled`
-
-**Error Responses**:
-- `404 Not Found`: Job not found
-
 #### `GET /api/v1/inference/results/{job_id}`
 
-Get inference results for a completed job.
+Get inference results for a job (backend endpoint).
 
 **Path Parameters**:
 - `job_id` (string, required): Job identifier
@@ -255,6 +198,7 @@ Get inference results for a completed job.
   "status": "completed",
   "results": [
     {
+      "frame_number": 1,
       "predictions": [
         {
           "label": "detected_object_0",
@@ -263,11 +207,13 @@ Get inference results for a completed job.
         }
       ],
       "confidence": [0.85],
+      "model_id": "example_vlm",
       "metadata": {
         "num_frames": 16,
         "frame_shape": [224, 224, 3],
         "prompt": "Detect all people and vehicles",
         "model_type": "example_vlm",
+        "model_id": "example_vlm",
         "device": "cuda",
         "timestamp": 1705665605.0
       }
@@ -280,9 +226,9 @@ Get inference results for a completed job.
 **Error Responses**:
 - `404 Not Found`: Job not found
 
-#### `DELETE /api/v1/inference/cancel/{job_id}`
+#### `DELETE /api/v1/inference/stop/{job_id}`
 
-Cancel a running or pending inference job.
+Stop/cancel a running or pending inference job.
 
 **Path Parameters**:
 - `job_id` (string, required): Job identifier
@@ -290,39 +236,31 @@ Cancel a running or pending inference job.
 **Response** (200 OK):
 ```json
 {
-  "message": "Job 550e8400-e29b-41d4-a716-446655440000 cancelled",
+  "message": "Job 550e8400-e29b-41d4-a716-446655440000 stopped",
   "job_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 **Error Responses**:
-- `404 Not Found`: Job not found or cannot be cancelled
+- `404 Not Found`: Job not found or cannot be stopped
 
-#### `GET /api/v1/inference/jobs`
+#### `DELETE /api/v1/inference/delete/{job_id}`
 
-List all inference jobs.
+Delete a completed job from history.
 
-**Query Parameters**:
-- `status` (string, optional): Filter by status (`pending`, `running`, `completed`, `failed`, `cancelled`)
+**Path Parameters**:
+- `job_id` (string, required): Job identifier
 
 **Response** (200 OK):
 ```json
 {
-  "jobs": [
-    {
-      "job_id": "550e8400-e29b-41d4-a716-446655440000",
-      "status": "completed",
-      "stream_ref": "https://example.com/stream.m3u8",
-      "prompt": "Detect all people and vehicles",
-      "fps": 2.0,
-      "created_at": 1705665600.0,
-      "frames_processed": 120,
-      "results_count": 15
-    }
-  ],
-  "total": 1
+  "message": "Job 550e8400-e29b-41d4-a716-446655440000 deleted",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+**Error Responses**:
+- `404 Not Found`: Job not found or cannot be deleted (only completed/failed/cancelled jobs can be deleted)
 
 ### Prompt Management Endpoints
 
@@ -354,58 +292,56 @@ Update the active prompt (global or job-specific).
 **Error Responses**:
 - `400 Bad Request`: Empty prompt or validation error
 
-#### `GET /api/v1/prompt/current`
+### FastAPI Streaming Service
 
-Get the current active prompt.
+The FastAPI streaming service provides real-time results polling for frontend applications.
+
+#### Starting the Streaming Service
+
+```bash
+# Start the FastAPI streaming service
+python -m app.api.streaming_api
+
+# Or with uvicorn directly
+uvicorn app.api.streaming_api:app --host 0.0.0.0 --port 8001
+```
+
+The streaming service will be available at `http://localhost:8001` (default port 8001).
+
+#### `GET /api/v1/inference/results/stream/{job_id}`
+
+Stream real-time inference results for a job (frontend endpoint).
+
+**Path Parameters**:
+- `job_id` (string, required): Job identifier
 
 **Query Parameters**:
-- `job_id` (string, optional): Get job-specific prompt
+- `limit` (integer, optional): Maximum number of results to return
+- `last_frame` (integer, optional): Last frame number received (for incremental polling, default: 0)
 
 **Response** (200 OK):
 ```json
 {
-  "prompt": "Detect only vehicles",
-  "version": 2,
-  "timestamp": 1705665600.0,
-  "created_at": "2024-01-19T10:00:00Z",
-  "updated_at": "2024-01-19T12:00:00Z",
-  "job_id": null
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "results": [
+    {
+      "frame_number": 1,
+      "predictions": [...],
+      "confidence": [...],
+      "model_id": "example_vlm",
+      "metadata": {...}
+    }
+  ],
+  "total_results": 15,
+  "new_results": 5,
+  "last_frame": 5
 }
 ```
 
 **Error Responses**:
-- `404 Not Found`: No prompt set
-
-#### `GET /api/v1/prompt/history`
-
-Get prompt history.
-
-**Query Parameters**:
-- `limit` (integer, optional): Maximum history entries (default: 10)
-- `job_id` (string, optional): Job-specific history (not yet implemented)
-
-**Response** (200 OK):
-```json
-{
-  "history": [
-    {
-      "prompt": "Detect only vehicles",
-      "version": 2,
-      "timestamp": 1705665600.0,
-      "created_at": "2024-01-19T10:00:00Z",
-      "updated_at": "2024-01-19T12:00:00Z"
-    },
-    {
-      "prompt": "Detect all people and vehicles",
-      "version": 1,
-      "timestamp": 1705665500.0,
-      "created_at": "2024-01-19T10:00:00Z",
-      "updated_at": "2024-01-19T10:00:00Z"
-    }
-  ],
-  "total": 2
-}
-```
+- `404 Not Found`: Job not found
+- `503 Service Unavailable`: RayServe backend unavailable
 
 ## Example Usage
 
@@ -442,30 +378,7 @@ curl -X POST "http://localhost:8000/api/v1/inference/start" \
   }'
 ```
 
-### Check Job Status
-
-```bash
-curl "http://localhost:8000/api/v1/inference/status/550e8400-e29b-41d4-a716-446655440000"
-```
-
-**Response**:
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "running",
-  "stream_ref": "https://example.com/stream.m3u8",
-  "prompt": "Detect all people and vehicles",
-  "fps": 2.0,
-  "created_at": 1705665600.0,
-  "started_at": 1705665601.0,
-  "completed_at": null,
-  "frames_processed": 120,
-  "results_count": 15,
-  "error": null
-}
-```
-
-### Get Results
+### Get Results (Backend)
 
 ```bash
 curl "http://localhost:8000/api/v1/inference/results/550e8400-e29b-41d4-a716-446655440000?limit=10"
@@ -478,6 +391,7 @@ curl "http://localhost:8000/api/v1/inference/results/550e8400-e29b-41d4-a716-446
   "status": "completed",
   "results": [
     {
+      "frame_number": 1,
       "predictions": [
         {
           "label": "detected_object_0",
@@ -486,21 +400,69 @@ curl "http://localhost:8000/api/v1/inference/results/550e8400-e29b-41d4-a716-446
         }
       ],
       "confidence": [0.85],
-      "metadata": {
-        "num_frames": 16,
-        "prompt": "Detect all people and vehicles",
-        "timestamp": 1705665605.0
-      }
+      "model_id": "example_vlm",
+      "metadata": {...}
     }
   ],
   "total_results": 15
 }
 ```
 
-### Cancel a Job
+### Stream Results (Frontend - Real-time Polling)
 
 ```bash
-curl -X DELETE "http://localhost:8000/api/v1/inference/cancel/550e8400-e29b-41d4-a716-446655440000"
+# First poll (get all results)
+curl "http://localhost:8001/api/v1/inference/results/stream/550e8400-e29b-41d4-a716-446655440000"
+
+# Subsequent polls (get only new results since last_frame=5)
+curl "http://localhost:8001/api/v1/inference/results/stream/550e8400-e29b-41d4-a716-446655440000?last_frame=5"
+```
+
+**Response**:
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "results": [
+    {
+      "frame_number": 6,
+      "predictions": [...],
+      "model_id": "example_vlm",
+      "metadata": {...}
+    }
+  ],
+  "total_results": 15,
+  "new_results": 1,
+  "last_frame": 6
+}
+```
+
+### Stop a Job
+
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/inference/stop/550e8400-e29b-41d4-a716-446655440000"
+```
+
+**Response**:
+```json
+{
+  "message": "Job 550e8400-e29b-41d4-a716-446655440000 stopped",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+### Delete a Job
+
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/inference/delete/550e8400-e29b-41d4-a716-446655440000"
+```
+
+**Response**:
+```json
+{
+  "message": "Job 550e8400-e29b-41d4-a716-446655440000 deleted",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000"
+}
 ```
 
 ### Update Prompt
@@ -525,26 +487,20 @@ curl -X POST "http://localhost:8000/api/v1/prompt/update" \
 }
 ```
 
-### Get Current Prompt
+### Test with HLS Stream
 
 ```bash
-curl "http://localhost:8000/api/v1/prompt/current"
-```
+# Start inference on HLS stream
+curl -X POST "http://localhost:8000/api/v1/inference/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stream_ref": "http://16.16.75.91/hls/6446687b-1ebb-4112-b7ba-f9e5e29aa84b/index.m3u8",
+    "prompt": "Detect all people and vehicles",
+    "fps": 2.0
+  }'
 
-### Get Prompt History
-
-```bash
-curl "http://localhost:8000/api/v1/prompt/history?limit=5"
-```
-
-### List All Jobs
-
-```bash
-# List all jobs
-curl "http://localhost:8000/api/v1/inference/jobs"
-
-# List only running jobs
-curl "http://localhost:8000/api/v1/inference/jobs?status=running"
+# Poll for results using streaming API
+curl "http://localhost:8001/api/v1/inference/results/stream/{job_id}?last_frame=0"
 ```
 
 ## Integrating Your VLM Model

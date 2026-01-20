@@ -162,14 +162,14 @@ class InferenceService:
         job_id: str,
         limit: Optional[int] = None
     ) -> Optional[List[Dict[str, Any]]]:
-        """Get job results
+        """Get job results with enhanced fields (frame_number, model_id)
         
         Args:
             job_id: Job ID
             limit: Optional limit on number of results
             
         Returns:
-            List of results or None if job not found
+            List of results with frame_number and model_id, or None if job not found
         """
         async with self._job_lock:
             job = self._jobs.get(job_id)
@@ -177,7 +177,23 @@ class InferenceService:
                 results = job.results
                 if limit is not None:
                     results = results[:limit]
-                return results
+                
+                # Enhance results with frame_number and model_id
+                enhanced_results = []
+                for idx, result in enumerate(results, start=1):
+                    enhanced_result = result.copy()
+                    enhanced_result["frame_number"] = idx
+                    
+                    # Extract model_id from metadata if available, otherwise use model_type
+                    if "metadata" in enhanced_result:
+                        metadata = enhanced_result["metadata"]
+                        enhanced_result["model_id"] = metadata.get("model_id") or metadata.get("model_type", "unknown")
+                    else:
+                        enhanced_result["model_id"] = "unknown"
+                    
+                    enhanced_results.append(enhanced_result)
+                
+                return enhanced_results
             return None
     
     async def cancel_job(self, job_id: str) -> bool:
@@ -214,6 +230,33 @@ class InferenceService:
             await self.state_manager.clear_job_prompt(job_id)
             
             logger.info(f"Job {job_id} cancelled")
+            return True
+    
+    async def delete_job(self, job_id: str) -> bool:
+        """Delete a job from history
+        
+        Args:
+            job_id: Job ID
+            
+        Returns:
+            True if deleted, False if not found or cannot be deleted
+        """
+        async with self._job_lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return False
+            
+            # Only allow deletion of completed, failed, or cancelled jobs
+            if job.status not in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                return False
+            
+            # Remove job from history
+            del self._jobs[job_id]
+            
+            # Cleanup job prompt
+            await self.state_manager.clear_job_prompt(job_id)
+            
+            logger.info(f"Job {job_id} deleted from history")
             return True
     
     async def list_jobs(self, status: Optional[JobStatus] = None) -> List[Dict[str, Any]]:

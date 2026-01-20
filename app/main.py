@@ -45,28 +45,43 @@ class ModelDeployment:
         self._init_task = None
         logger.info(f"Initializing ModelDeployment with model_path: {settings.model_path}")
         self.model = ExampleVLM()
-        # Schedule async initialization
+        # Schedule async initialization - use background task
         import asyncio
+        # Create a task that will run the async initialization
+        # In Ray Serve, we need to ensure the event loop is available
         try:
             loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, create a task
+                self._init_task = asyncio.create_task(self._async_init())
+            else:
+                # If no loop is running, run it synchronously
+                asyncio.run(self._async_init())
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        if loop.is_running():
-            self._init_task = asyncio.create_task(self._async_init())
-        else:
-            loop.run_until_complete(self._async_init())
+            # No event loop, create one and run
+            asyncio.run(self._async_init())
     
     async def _async_init(self):
         """Async initialization"""
-        await self.model.initialize(
-            model_path=settings.model_path or "placeholder",
-            device=settings.device
-        )
-        self._initialized = True
-        health_monitor.set_model_loaded(True)
-        logger.info("ModelDeployment initialized successfully")
+        try:
+            await self.model.initialize(
+                model_path=settings.model_path or "placeholder",
+                device=settings.device
+            )
+            self._initialized = True
+            health_monitor.set_model_loaded(True)
+            logger.info("ModelDeployment initialized successfully")
+        except Exception as e:
+            logger.error(f"Model initialization failed: {e}", exc_info=True)
+            self._initialized = False
+            health_monitor.set_model_loaded(False)
+            raise
+    
+    async def is_initialized(self) -> bool:
+        """Check if model is initialized"""
+        if self._init_task and not self._init_task.done():
+            await self._init_task
+        return self._initialized and self.model is not None
     
     async def predict(self, frames: list, prompt: str) -> Dict[str, Any]:
         """Run inference on frames
@@ -137,13 +152,6 @@ class InferenceServiceDeployment:
             logger.error(f"Failed to start inference: {e}", exc_info=True)
             raise InferenceException(f"Failed to start inference: {e}") from e
     
-    async def get_status(self, job_id: str) -> Dict[str, Any]:
-        """Get job status"""
-        status = await self.inference_service.get_job_status(job_id)
-        if not status:
-            raise InferenceException(f"Job {job_id} not found")
-        return status
-    
     async def get_results(self, job_id: str, limit: Optional[int] = None) -> Dict[str, Any]:
         """Get job results"""
         status = await self.inference_service.get_job_status(job_id)
@@ -158,24 +166,19 @@ class InferenceServiceDeployment:
             "total_results": len(results) if results else 0
         }
     
-    async def cancel_job(self, job_id: str) -> Dict[str, Any]:
-        """Cancel job"""
+    async def stop_job(self, job_id: str) -> Dict[str, Any]:
+        """Stop/cancel running job"""
         cancelled = await self.inference_service.cancel_job(job_id)
         if not cancelled:
-            raise InferenceException(f"Job {job_id} not found or cannot be cancelled")
-        return {"message": f"Job {job_id} cancelled", "job_id": job_id}
+            raise InferenceException(f"Job {job_id} not found or cannot be stopped")
+        return {"message": f"Job {job_id} stopped", "job_id": job_id}
     
-    async def list_jobs(self, status_filter: Optional[str] = None) -> Dict[str, Any]:
-        """List all jobs"""
-        job_status = None
-        if status_filter:
-            try:
-                job_status = JobStatus(status_filter.lower())
-            except ValueError:
-                raise ValidationException(f"Invalid status: {status_filter}")
-        
-        jobs = await self.inference_service.list_jobs(status=job_status)
-        return {"jobs": jobs, "total": len(jobs)}
+    async def delete_job(self, job_id: str) -> Dict[str, Any]:
+        """Delete completed job from history"""
+        deleted = await self.inference_service.delete_job(job_id)
+        if not deleted:
+            raise InferenceException(f"Job {job_id} not found or cannot be deleted")
+        return {"message": f"Job {job_id} deleted", "job_id": job_id}
     
     async def update_prompt(self, new_prompt: str, job_id: Optional[str] = None, 
                            preserve_previous: bool = True) -> Dict[str, Any]:
@@ -189,44 +192,25 @@ class InferenceServiceDeployment:
         if job_id:
             result["job_id"] = job_id
         return result
-    
-    async def get_current_prompt(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Get current prompt"""
-        prompt_state = await self.state_manager.get_prompt_state(job_id=job_id)
-        if not prompt_state:
-            return None
-        result = prompt_state.to_dict()
-        if job_id:
-            result["job_id"] = job_id
-        return result
-    
-    async def get_prompt_history(self, job_id: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
-        """Get prompt history"""
-        history = await self.state_manager.get_prompt_history(job_id=job_id, limit=limit)
-        return {"history": history, "total": len(history)}
 
 
 # API Deployment
-@serve.deployment(route_prefix="/api/v1", name="api")
+@serve.deployment(name="api")
 class APIDeployment:
     """Ray Serve deployment for API endpoints"""
     
-    def __init__(self):
+    def __init__(self, inference_service_handle, model_handle):
         """Initialize API deployment"""
-        self._inference_service_handle = None
-        self._model_handle = None
+        self._inference_service_handle = inference_service_handle
+        self._model_handle = model_handle
         logger.info("APIDeployment initialized")
     
     def _get_inference_service_handle(self):
-        """Get inference service handle (lazy initialization)"""
-        if self._inference_service_handle is None:
-            self._inference_service_handle = serve.get_deployment("inference_service").get_handle()
+        """Get inference service handle"""
         return self._inference_service_handle
     
     def _get_model_handle(self):
-        """Get model handle (lazy initialization)"""
-        if self._model_handle is None:
-            self._model_handle = serve.get_deployment("model").get_handle()
+        """Get model handle"""
         return self._model_handle
     
     async def __call__(self, request: Request):
@@ -235,8 +219,23 @@ class APIDeployment:
         method = request.method
         
         try:
+            # Health endpoint
+            if path == "/health" or path == "/health/":
+                # Check model status by calling the model deployment
+                model_loaded = False
+                try:
+                    model_handle = self._get_model_handle()
+                    model_loaded = await model_handle.is_initialized.remote()
+                except Exception as e:
+                    logger.warning(f"Failed to check model status: {e}")
+                    model_loaded = False
+                
+                status = health_monitor.get_health_status()
+                status["model_loaded"] = model_loaded
+                return create_success_response(status)
+            
             # Inference endpoints
-            if path.startswith("/api/v1/inference"):
+            elif path.startswith("/api/v1/inference"):
                 return await self._handle_inference(request, path, method)
             
             # Prompt endpoints
@@ -269,11 +268,6 @@ class APIDeployment:
             )
             return create_success_response(result, 202)
         
-        elif method == "GET" and "/status/" in path:
-            job_id = path.split("/status/")[-1]
-            status = await handle.get_status.remote(job_id)
-            return create_success_response(status)
-        
         elif method == "GET" and "/results/" in path:
             job_id = path.split("/results/")[-1]
             limit = request.query_params.get("limit")
@@ -281,14 +275,14 @@ class APIDeployment:
             results = await handle.get_results.remote(job_id, limit=limit)
             return create_success_response(results)
         
-        elif method == "DELETE" and "/cancel/" in path:
-            job_id = path.split("/cancel/")[-1]
-            result = await handle.cancel_job.remote(job_id)
+        elif method == "DELETE" and "/stop/" in path:
+            job_id = path.split("/stop/")[-1]
+            result = await handle.stop_job.remote(job_id)
             return create_success_response(result)
         
-        elif method == "GET" and path.endswith("/jobs"):
-            status_filter = request.query_params.get("status")
-            result = await handle.list_jobs.remote(status_filter=status_filter)
+        elif method == "DELETE" and "/delete/" in path:
+            job_id = path.split("/delete/")[-1]
+            result = await handle.delete_job.remote(job_id)
             return create_success_response(result)
         
         else:
@@ -307,63 +301,8 @@ class APIDeployment:
             )
             return create_success_response(result)
         
-        elif method == "GET" and path.endswith("/current"):
-            job_id = request.query_params.get("job_id")
-            result = await handle.get_current_prompt.remote(job_id=job_id)
-            if not result:
-                return create_error_response("No prompt set", status_code=404)
-            return create_success_response(result)
-        
-        elif method == "GET" and path.endswith("/history"):
-            limit = request.query_params.get("limit", "10")
-            limit = int(limit) if limit.isdigit() else 10
-            job_id = request.query_params.get("job_id")
-            result = await handle.get_prompt_history.remote(job_id=job_id, limit=limit)
-            return create_success_response(result)
-        
         else:
             return create_error_response("Not found", f"Unknown prompt endpoint: {path}", 404)
-
-
-# Health Deployment
-@serve.deployment(route_prefix="/health", name="health")
-class HealthDeployment:
-    """Ray Serve deployment for health checks"""
-    
-    async def __call__(self, request: Request):
-        """Handle health check requests"""
-        path = request.url.path
-        
-        if path == "/health" or path == "/health/":
-            status = health_monitor.get_health_status()
-            return create_success_response(status)
-        
-        elif path == "/health/ready" or path.endswith("/ready"):
-            status = health_monitor.get_readiness_status()
-            ready = status.get("ready", False)
-            return create_success_response(status, 200 if ready else 503)
-        
-        elif path == "/health/live" or path.endswith("/live"):
-            status = health_monitor.get_liveness_status()
-            return create_success_response(status)
-        
-        else:
-            return create_error_response("Not found", f"Unknown health endpoint: {path}", 404)
-
-
-# Root endpoint
-@serve.deployment(route_prefix="/", name="root")
-class RootDeployment:
-    """Root endpoint deployment"""
-    
-    async def __call__(self, request: Request):
-        """Handle root requests"""
-        return create_success_response({
-            "service": "Free-Roam Inference Service (Ray Serve)",
-            "version": settings.api_version,
-            "status": "running",
-            "docs": "See /health for health checks"
-        })
 
 
 # Build the application
@@ -372,12 +311,15 @@ def build_app() -> Application:
     # Create deployments (order matters - dependencies first)
     model_deployment = ModelDeployment.bind()
     inference_service_deployment = InferenceServiceDeployment.bind()
-    api_deployment = APIDeployment.bind()
-    health_deployment = HealthDeployment.bind()
-    root_deployment = RootDeployment.bind()
     
-    # Return main API deployment (Ray Serve will handle routing)
-    # Health and root are separate deployments with their own routes
+    # Pass handles to API deployment
+    api_deployment = APIDeployment.bind(
+        inference_service_handle=inference_service_deployment,
+        model_handle=model_deployment
+    )
+    
+    # Return main API deployment
+    # All routing is handled in APIDeployment.__call__
     return api_deployment
 
 
