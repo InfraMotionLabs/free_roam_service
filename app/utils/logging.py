@@ -64,9 +64,8 @@ def setup_logging() -> None:
     root_logger.addHandler(console_handler)
     
     # Set levels for third-party loggers
-    logging.getLogger("uvicorn").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-    logging.getLogger("fastapi").setLevel(logging.WARNING)
+    logging.getLogger("ray").setLevel(logging.WARNING)
+    logging.getLogger("ray.serve").setLevel(logging.INFO)
     
     logging.info(f"Logging configured: level={settings.log_level}, format={settings.log_format}")
 

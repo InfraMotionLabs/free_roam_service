@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     
     # API Configuration
     api_key: Optional[str] = Field(default=None, env="API_KEY", description="Optional API key for authentication")
-    api_title: str = Field(default="Free-Roam Inference Service", env="API_TITLE", description="API title")
+    api_title: str = Field(default="Free-Roam Inference Service (Ray Serve)", env="API_TITLE", description="API title")
     api_version: str = Field(default="1.0.0", env="API_VERSION", description="API version")
     cors_origins: list = Field(default=["*"], env="CORS_ORIGINS", description="CORS allowed origins")
     rate_limit_per_minute: int = Field(default=60, env="RATE_LIMIT_PER_MINUTE", ge=1, description="Rate limit per minute per IP")
@@ -40,10 +40,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL", description="Logging level")
     log_format: str = Field(default="json", env="LOG_FORMAT", description="Log format: 'json' or 'text'")
     
-    # Server Configuration
-    host: str = Field(default="0.0.0.0", env="HOST", description="Server host")
-    port: int = Field(default=8000, env="PORT", ge=1, le=65535, description="Server port")
-    workers: int = Field(default=1, env="WORKERS", ge=1, description="Number of worker processes")
+    # Ray Serve Configuration
+    ray_serve_host: str = Field(default="0.0.0.0", env="RAY_SERVE_HOST", description="Ray Serve host")
+    ray_serve_port: int = Field(default=8000, env="RAY_SERVE_PORT", ge=1, le=65535, description="Ray Serve port")
+    num_replicas: int = Field(default=1, env="NUM_REPLICAS", ge=1, description="Number of deployment replicas")
     
     # Memory Management
     max_concurrent_streams: int = Field(default=10, env="MAX_CONCURRENT_STREAMS", ge=1, description="Maximum concurrent stream processing jobs")
@@ -91,4 +91,6 @@ def get_settings() -> Settings:
 
 # Global settings instance
 settings = get_settings()
+
+
 

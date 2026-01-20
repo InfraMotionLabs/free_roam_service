@@ -1,4 +1,4 @@
-"""Async inference engine with queue management"""
+"""Inference service for Ray Serve - job tracking and processing"""
 
 import asyncio
 import uuid
@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 import logging
 import gc
 
-from app.models.base import BaseVLM
 from app.services.stream_processor import StreamProcessor
 from app.services.frame_sampler import FrameSampler
 from app.core.state_manager import PromptStateManager
@@ -60,23 +59,20 @@ class InferenceJob:
         }
 
 
-class InferenceEngine:
-    """Async inference engine for processing video streams"""
+class InferenceService:
+    """Inference service for managing jobs and processing streams"""
     
     def __init__(
         self,
-        model: BaseVLM,
         stream_processor: StreamProcessor,
         state_manager: PromptStateManager
     ):
-        """Initialize inference engine
+        """Initialize inference service
         
         Args:
-            model: VLM model instance
             stream_processor: Stream processor instance
             state_manager: Prompt state manager instance
         """
-        self.model = model
         self.stream_processor = stream_processor
         self.state_manager = state_manager
         
@@ -85,7 +81,7 @@ class InferenceEngine:
         self._processing_tasks: Dict[str, asyncio.Task] = {}
         self._max_concurrent = settings.max_concurrent_streams
         
-        logger.info(f"InferenceEngine initialized (max_concurrent={self._max_concurrent})")
+        logger.info(f"InferenceService initialized (max_concurrent={self._max_concurrent})")
     
     async def start_inference(
         self,
@@ -142,135 +138,9 @@ class InferenceEngine:
             # Set job-specific prompt
             await self.state_manager.set_job_prompt(job_id, prompt)
         
-        # Start processing task
-        task = asyncio.create_task(self._process_job(job))
-        self._processing_tasks[job_id] = task
-        
-        logger.info(f"Started inference job {job_id} for stream: {stream_ref}")
+        logger.info(f"Created inference job {job_id} for stream: {stream_ref}")
         
         return job_id
-    
-    async def _process_job(self, job: InferenceJob) -> None:
-        """Process an inference job
-        
-        Args:
-            job: Inference job to process
-        """
-        job.status = JobStatus.RUNNING
-        job.started_at = time.time()
-        
-        try:
-            # Create frame sampler
-            sampler = FrameSampler(target_fps=job.fps)
-            
-            # Get frames from stream
-            frame_batch = []
-            batch_size = settings.max_batch_size
-            frames_processed = 0
-            
-            async for frame in self.stream_processor.get_frames(
-                stream_ref=job.stream_ref,
-                fps=job.fps
-            ):
-                frame_batch.append(frame)
-                
-                # Process batch when full
-                if len(frame_batch) >= batch_size:
-                    predictions = await self._process_batch(
-                        frames=frame_batch,
-                        prompt=job.prompt
-                    )
-                    job.results.extend(predictions)
-                    frames_processed += len(frame_batch)
-                    job.frames_processed = frames_processed
-                    
-                    # Cleanup batch
-                    del frame_batch
-                    frame_batch = []
-                    gc.collect()
-            
-            # Process remaining frames
-            if frame_batch:
-                predictions = await self._process_batch(
-                    frames=frame_batch,
-                    prompt=job.prompt
-                )
-                job.results.extend(predictions)
-                frames_processed += len(frame_batch)
-                job.frames_processed = frames_processed
-                
-                del frame_batch
-                gc.collect()
-            
-            job.status = JobStatus.COMPLETED
-            job.completed_at = time.time()
-            
-            logger.info(
-                f"Job {job.job_id} completed: {frames_processed} frames, "
-                f"{len(job.results)} predictions"
-            )
-            
-        except asyncio.TimeoutError:
-            job.status = JobStatus.FAILED
-            job.error = "Inference timeout"
-            job.completed_at = time.time()
-            logger.error(f"Job {job.job_id} timed out")
-            raise InferenceTimeoutException(f"Job {job.job_id} timed out")
-            
-        except Exception as e:
-            job.status = JobStatus.FAILED
-            job.error = str(e)
-            job.completed_at = time.time()
-            logger.error(f"Job {job.job_id} failed: {e}", exc_info=True)
-            raise InferenceException(f"Job {job.job_id} failed: {e}") from e
-        
-        finally:
-            # Cleanup
-            async with self._job_lock:
-                if job.job_id in self._processing_tasks:
-                    del self._processing_tasks[job.job_id]
-    
-    async def _process_batch(
-        self,
-        frames: List,
-        prompt: str
-    ) -> List[Dict[str, Any]]:
-        """Process a batch of frames
-        
-        Args:
-            frames: List of frames
-            prompt: Prompt text
-            
-        Returns:
-            List of prediction dictionaries
-        """
-        try:
-            # Run inference with timeout
-            predictions = await asyncio.wait_for(
-                self.model.predict(frames, prompt),
-                timeout=settings.inference_timeout
-            )
-            
-            # Format predictions
-            if isinstance(predictions, dict):
-                # Extract predictions list
-                pred_list = predictions.get("predictions", [])
-                if not pred_list and "predictions" not in predictions:
-                    # Single prediction
-                    pred_list = [predictions]
-                
-                return pred_list
-            elif isinstance(predictions, list):
-                return predictions
-            else:
-                return [{"prediction": predictions}]
-                
-        except asyncio.TimeoutError:
-            logger.warning(f"Inference batch timed out after {settings.inference_timeout}s")
-            raise InferenceTimeoutException("Inference batch timed out")
-        except Exception as e:
-            logger.error(f"Inference batch failed: {e}")
-            raise InferenceException(f"Inference batch failed: {e}") from e
     
     async def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job status
@@ -327,7 +197,7 @@ class InferenceEngine:
             if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
                 return False
             
-            # Cancel processing task
+            # Cancel processing task if exists
             if job_id in self._processing_tasks:
                 task = self._processing_tasks[job_id]
                 task.cancel()
@@ -361,35 +231,42 @@ class InferenceEngine:
                 jobs = [j for j in jobs if j.status == status]
             return [job.to_dict() for job in jobs]
     
-    async def cleanup_old_jobs(self, max_age_seconds: float = 3600) -> int:
-        """Clean up old completed/failed jobs
+    async def process_job_batch(
+        self,
+        job_id: str,
+        frames: List,
+        prompt: str,
+        model_deployment
+    ) -> List[Dict[str, Any]]:
+        """Process a batch of frames for a job
         
         Args:
-            max_age_seconds: Maximum age in seconds
+            job_id: Job ID
+            frames: List of frames
+            prompt: Prompt text
+            model_deployment: Ray Serve model deployment handle
             
         Returns:
-            Number of jobs cleaned up
+            List of predictions
         """
-        current_time = time.time()
-        cleaned = 0
-        
-        async with self._job_lock:
-            to_remove = []
-            for job_id, job in self._jobs.items():
-                if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-                    age = current_time - (job.completed_at or job.created_at)
-                    if age > max_age_seconds:
-                        to_remove.append(job_id)
+        try:
+            # Call model deployment for inference
+            predictions = await model_deployment.predict.remote(frames, prompt)
             
-            for job_id in to_remove:
-                del self._jobs[job_id]
-                await self.state_manager.clear_job_prompt(job_id)
-                cleaned += 1
-        
-        if cleaned > 0:
-            logger.info(f"Cleaned up {cleaned} old jobs")
-        
-        return cleaned
+            # Format predictions
+            if isinstance(predictions, dict):
+                pred_list = predictions.get("predictions", [])
+                if not pred_list and "predictions" not in predictions:
+                    pred_list = [predictions]
+                return pred_list
+            elif isinstance(predictions, list):
+                return predictions
+            else:
+                return [{"prediction": predictions}]
+                
+        except Exception as e:
+            logger.error(f"Inference batch failed for job {job_id}: {e}")
+            raise InferenceException(f"Inference batch failed: {e}") from e
 
 
 

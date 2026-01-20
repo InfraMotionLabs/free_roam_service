@@ -229,3 +229,5 @@ class PromptStateManager:
                     self._global_prompt = None
                     logger.info("Cleared global prompt")
 
+
+

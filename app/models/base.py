@@ -102,3 +102,5 @@ class BaseVLM(ABC):
         """Get the device being used"""
         return self._device
 
+
+

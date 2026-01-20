@@ -1,4 +1,4 @@
-"""Test suite for Free-Roam Inference Service"""
+"""Test suite for Ray Serve Free-Roam Inference Service"""
 
 
 
